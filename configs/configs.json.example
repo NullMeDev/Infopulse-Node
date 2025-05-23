@@ -1,1 +1,80 @@
-
+// config/config.example.json
+{
+  "logFilePath": "./logs/infopulse.log",
+  "dbFilePath": "./data/intelligence.db",
+  "commandPrefix": "!",
+  "fetchTimeoutSeconds": 30,
+  "maxConcurrentFetches": 5,
+  "autopostEnabled": true,
+  "autopostChannels": {
+    "CYBERSEC": "123456789012345678",
+    "AITOOLS": "123456789012345678",
+    "OPENSOURCE": "123456789012345678",
+    "INFOSEC_NEWS": "123456789012345678"
+  },
+  "feedSources": [
+    {
+      "id": "feedly-cybersec",
+      "name": "Feedly Cybersecurity",
+      "url": "https://feedly.com/i/mix/content/security/cybersecurity/rss",
+      "categories": ["CYBERSEC"],
+      "fetchMethod": "rss",
+      "updateFreq": 60,
+      "enabled": true
+    },
+    {
+      "id": "krebs",
+      "name": "Krebs on Security",
+      "url": "https://krebsonsecurity.com/feed/",
+      "categories": ["CYBERSEC", "INFOSEC_NEWS"],
+      "fetchMethod": "rss",
+      "updateFreq": 120,
+      "enabled": true
+    },
+    {
+      "id": "threatpost",
+      "name": "Threatpost",
+      "url": "https://threatpost.com/feed/",
+      "categories": ["CYBERSEC", "INFOSEC_NEWS"],
+      "fetchMethod": "rss",
+      "updateFreq": 60,
+      "enabled": true
+    },
+    {
+      "id": "aipanic",
+      "name": "AI Panic",
+      "url": "https://aipanic.news/feed",
+      "categories": ["AITOOLS"],
+      "fetchMethod": "rss",
+      "updateFreq": 120,
+      "enabled": true
+    },
+    {
+      "id": "hnai",
+      "name": "Hacker News AI",
+      "url": "https://hnrss.org/newest?q=AI+OR+GPT+OR+LLM",
+      "categories": ["AITOOLS"],
+      "fetchMethod": "rss",
+      "updateFreq": 60,
+      "enabled": true
+    },
+    {
+      "id": "github-blog",
+      "name": "GitHub Blog",
+      "url": "https://github.blog/feed/",
+      "categories": ["OPENSOURCE"],
+      "fetchMethod": "rss",
+      "updateFreq": 180,
+      "enabled": true
+    },
+    {
+      "id": "opensourcefeed",
+      "name": "OpenSource News",
+      "url": "https://opensource.com/feed",
+      "categories": ["OPENSOURCE"],
+      "fetchMethod": "rss",
+      "updateFreq": 180,
+      "enabled": true
+    }
+  ]
+}
