@@ -2,61 +2,40 @@
 package models
 
 import (
-    "time"
+	"time"
 )
 
-// Category represents intelligence categories
+// Category represents a topic category for intelligence items
 type Category string
 
 const (
-    CategoryCybersec    Category = "cybersec"
-    CategoryAITools     Category = "ai-tools"
-    CategoryOpenSource  Category = "opensource"
-    CategoryInfosecNews Category = "infosec-news"
+	CategoryCybersec    Category = "CYBERSEC"
+	CategoryAITools     Category = "AITOOLS"
+	CategoryOpenSource  Category = "OPENSOURCE"
+	CategoryInfosecNews Category = "INFOSEC_NEWS"
 )
 
-// FeedSource represents a configured intelligence source
-type FeedSource struct {
-    ID          string     `json:"id"`
-    Name        string     `json:"name"`
-    URL         string     `json:"url"`
-    Categories  []Category `json:"categories"`
-    FetchMethod string     `json:"fetchMethod"` // "rss", "api", etc.
-    UpdateFreq  int        `json:"updateFrequencyMinutes"`
-    Enabled     bool       `json:"enabled"`
-}
-
-// Intelligence represents processed intelligence ready for output
+// Intelligence represents an intelligence item
 type Intelligence struct {
-    ID          string    `json:"id"`
-    SourceID    string    `json:"sourceId"`
-    Category    Category  `json:"category"`
-    Title       string    `json:"title"`
-    URL         string    `json:"url"`
-    Summary     string    `json:"summary"`
-    Published   time.Time `json:"published"`
-    Retrieved   time.Time `json:"retrieved"`
-    Hash        string    `json:"hash"` // Deduplication hash
-    Sentiment   int8      `json:"sentiment"` // -1, 0, 1 for future sentiment analysis
-    Entities    []Entity  `json:"entities,omitempty"`
-    Severity    string    `json:"severity,omitempty"` // For CVEs and security alerts
+	ID        string    `json:"id"`        // Unique identifier
+	SourceID  string    `json:"sourceId"`  // ID of the source feed
+	Category  Category  `json:"category"`  // Primary category
+	Title     string    `json:"title"`     // Title of the item
+	URL       string    `json:"url"`       // URL to the original content
+	Summary   string    `json:"summary"`   // Summary or excerpt
+	Published time.Time `json:"published"` // Original publication date
+	Retrieved time.Time `json:"retrieved"` // When the item was retrieved
+	Hash      string    `json:"hash"`      // Hash for deduplication
+	Severity  string    `json:"severity"`  // Severity (for CVEs and vulnerabilities)
 }
 
-// Entity represents a named entity extracted from intelligence
-type Entity struct {
-    Type  string `json:"type"` // organization, person, technology, threat-actor, etc.
-    Name  string `json:"name"`
-    Count int    `json:"count"` // Number of occurrences
-}
-
-// LogEntry represents a local log entry
-type LogEntry struct {
-    Timestamp time.Time `json:"timestamp"`
-    Level     string    `json:"level"`
-    Source    string    `json:"source"`
-    Category  Category  `json:"category,omitempty"`
-    Title     string    `json:"title,omitempty"`
-    URL       string    `json:"url,omitempty"`
-    Message   string    `json:"message"`
-    Sentiment int8      `json:"sentiment,omitempty"`
+// FeedSource represents a source of intelligence
+type FeedSource struct {
+	ID         string     `json:"id"`         // Unique identifier
+	Name       string     `json:"name"`       // Display name
+	URL        string     `json:"url"`        // URL to fetch
+	Categories []Category `json:"categories"` // Categories this feed belongs to
+	FetchMethod string    `json:"fetchMethod"` // Method used to fetch (rss, api, etc.)
+	UpdateFreq int        `json:"updateFreq"`  // Update frequency in minutes
+	Enabled    bool       `json:"enabled"`     // Whether this feed is enabled
 }
