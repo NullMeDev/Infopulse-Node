@@ -11,16 +11,15 @@ import (
 	"github.com/NullMeDev/Infopulse-Node/internal/models"
 )
 
-// Engine coordinates feed operations
+// Engine manages feed fetching and processing
 type Engine struct {
-	config     *config.Config
-	parser     *Parser
-	store      *Store
-	logger     *logger.Logger
-	mu         sync.Mutex
-	isRunning  bool
-	stopChan   chan struct{}
-	waitGroup  sync.WaitGroup
+	config   *config.Config
+	parser   *Parser
+	store    *Store
+	logger   *logger.Logger
+	sources  []models.FeedSource
+	stopChan chan struct{}
+	wg       sync.WaitGroup
 }
 
 // NewEngine creates a new feed engine
@@ -34,166 +33,187 @@ func NewEngine(cfg *config.Config, logger *logger.Logger) (*Engine, error) {
 		return nil, fmt.Errorf("failed to create store: %v", err)
 	}
 
-	return &Engine{
-		config:    cfg,
-		parser:    parser,
-		store:     store,
-		logger:    logger,
-		stopChan:  make(chan struct{}),
-	}, nil
-}
-
-// Start begins feed processing
-func (e *Engine) Start() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.isRunning {
-		return fmt.Errorf("engine is already running")
+	// Create engine
+	engine := &Engine{
+		config:   cfg,
+		parser:   parser,
+		store:    store,
+		logger:   logger,
+		sources:  cfg.FeedSources,
+		stopChan: make(chan struct{}),
 	}
 
-	e.isRunning = true
-	e.stopChan = make(chan struct{})
+	return engine, nil
+}
 
-	// Start a goroutine to manage feed updates
-	e.waitGroup.Add(1)
-	go e.run()
+// Start starts the feed engine
+func (e *Engine) Start() error {
+	e.logger.Info("Engine", "Starting feed engine")
 
-	e.logger.Info("Engine", "Feed engine started")
+	// Start update loop
+	e.wg.Add(1)
+	go e.updateLoop()
+
 	return nil
 }
 
-// Stop stops feed processing
+// Stop stops the feed engine
 func (e *Engine) Stop() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.logger.Info("Engine", "Stopping feed engine")
 
-	if !e.isRunning {
-		return nil
-	}
-
-	// Signal all workers to stop
+	// Signal all goroutines to stop
 	close(e.stopChan)
 
-	// Wait for all workers to finish
-	e.waitGroup.Wait()
+	// Wait for all goroutines to finish
+	e.wg.Wait()
 
-	// Save store before exiting
-	if err := e.store.Save(); err != nil {
-		e.logger.Error("Engine", fmt.Sprintf("Failed to save store: %v", err))
-	}
-
-	e.isRunning = false
-	e.logger.Info("Engine", "Feed engine stopped")
-	return nil
+	// Close store
+	return e.store.Close()
 }
 
-// run is the main engine loop
-func (e *Engine) run() {
-	defer e.waitGroup.Done()
+// updateLoop periodically updates feeds
+func (e *Engine) updateLoop() {
+	defer e.wg.Done()
 
-	// First run immediately
-	e.fetchAllFeeds()
+	// Immediate first update
+	e.updateAllFeeds()
 
 	// Set up ticker for periodic updates
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			e.fetchAllFeeds()
+			e.updateAllFeeds()
 		case <-e.stopChan:
+			e.logger.Info("Engine", "Update loop stopped")
 			return
 		}
 	}
 }
 
-// fetchAllFeeds processes all configured feed sources
-func (e *Engine) fetchAllFeeds() {
-	e.logger.Info("Engine", "Starting feed update cycle")
+// updateAllFeeds updates all configured feeds
+func (e *Engine) updateAllFeeds() {
+	e.logger.Info("Engine", fmt.Sprintf("Updating %d feeds", len(e.sources)))
 
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, e.config.MaxConcurrentFetches)
+	// Create worker pool
+	type Job struct {
+		source models.FeedSource
+	}
+	type Result struct {
+		source models.FeedSource
+		items  []*models.Intelligence
+		err    error
+	}
 
-	for _, source := range e.config.FeedSources {
+	jobs := make(chan Job, len(e.sources))
+	results := make(chan Result, len(e.sources))
+	
+	// Create workers
+	var workersWg sync.WaitGroup
+	workerCount := e.config.MaxConcurrentFetches
+	if workerCount <= 0 {
+		workerCount = 5 // Default to 5 workers
+	}
+
+	for i := 0; i < workerCount; i++ {
+		workersWg.Add(1)
+		go func() {
+			defer workersWg.Done()
+			
+			for job := range jobs {
+				// Fetch and parse feed
+				items, err := e.parser.ParseFeed(job.source)
+				results <- Result{
+					source: job.source,
+					items:  items,
+					err:    err,
+				}
+			}
+		}()
+	}
+
+	// Queue jobs
+	for _, source := range e.sources {
 		if !source.Enabled {
 			continue
 		}
-
-		// Check if it's time to update this feed
-		// TODO: Implement proper update frequency tracking
-
-		// Acquire semaphore slot
-		semaphore <- struct{}{}
-		wg.Add(1)
-
-		// Start worker goroutine
-		go func(src models.FeedSource) {
-			defer wg.Done()
-			defer func() { <-semaphore }() // Release semaphore slot
-
-			// Fetch and process feed
-			e.processFeed(src)
-		}(source)
+		jobs <- Job{source: source}
 	}
+	close(jobs)
 
-	// Wait for all workers to finish
-	wg.Wait()
-	
-	// Save store after updates
-	if err := e.store.Save(); err != nil {
-		e.logger.Error("Engine", fmt.Sprintf("Failed to save store: %v", err))
-	}
+	// Process results in a separate goroutine
+	var processWg sync.WaitGroup
+	processWg.Add(1)
+	go func() {
+		defer processWg.Done()
+		
+		totalItems := 0
+		savedItems := 0
+		
+		for i := 0; i < len(e.sources); i++ {
+			result := <-results
+			if result.err != nil {
+				e.logger.Error("Engine", fmt.Sprintf("Failed to update feed %s: %v", result.source.Name, result.err))
+				continue
+			}
+			
+			totalItems += len(result.items)
+			count, err := e.store.SaveIntelligence(result.items)
+			if err != nil {
+				e.logger.Error("Engine", fmt.Sprintf("Failed to save items from %s: %v", result.source.Name, err))
+				continue
+			}
+			
+			savedItems += count
+			if count > 0 {
+				e.logger.Info("Engine", fmt.Sprintf("Saved %d/%d new items from %s", count, len(result.items), result.source.Name))
+			}
+		}
+		
+		e.logger.Info("Engine", fmt.Sprintf("Feed update complete. Processed %d items, saved %d new items", totalItems, savedItems))
+	}()
 
-	// Cleanup old items (keep items for 30 days)
-	e.store.Cleanup(30 * 24 * time.Hour)
+	// Wait for workers to finish
+	workersWg.Wait()
+	close(results)
 	
-	e.logger.Info("Engine", "Finished feed update cycle")
+	// Wait for processing to finish
+	processWg.Wait()
 }
 
-// processFeed fetches and processes a single feed
-func (e *Engine) processFeed(source models.FeedSource) {
-	e.logger.Info("Engine", fmt.Sprintf("Processing feed: %s", source.Name))
-
-	// Parse feed
-	items, err := e.parser.ParseFeed(source)
-	if err != nil {
-		e.logger.Error("Engine", fmt.Sprintf("Failed to parse feed %s: %v", source.Name, err))
-		return
-	}
-
-	// Process and store items
-	var newItems int
-	for _, item := range items {
-		// Add to store (only counts as new if not a duplicate)
-		isNew, err := e.store.AddItem(item)
-		if err != nil {
-			e.logger.Error("Engine", fmt.Sprintf("Failed to add item %s: %v", item.Title, err))
-			continue
-		}
-
-		if isNew {
-			newItems++
-			e.logger.Info("Engine", fmt.Sprintf("New item: %s", item.Title))
-			
-			// TODO: Trigger notifications for new items
-		}
-	}
-
-	e.logger.Info("Engine", fmt.Sprintf("Processed feed %s: %d items, %d new", 
-		source.Name, len(items), newItems))
+// RefreshFeeds forces a refresh of all feeds
+func (e *Engine) RefreshFeeds() {
+	go e.updateAllFeeds()
 }
 
 // GetLatestIntel returns the latest intelligence items
 func (e *Engine) GetLatestIntel(category models.Category, limit int) []*models.Intelligence {
-	if category != "" {
-		return e.store.GetItemsByCategory(category, limit)
+	items, err := e.store.GetLatestIntelligence(category, limit)
+	if err != nil {
+		e.logger.Error("Engine", fmt.Sprintf("Failed to get latest intelligence: %v", err))
+		return []*models.Intelligence{}
 	}
-	return e.store.GetLatestItems(limit)
+	return items
 }
 
-// GetTotalCount returns the total number of intelligence items
+// GetIntelByID gets an intelligence item by ID
+func (e *Engine) GetIntelByID(id string) *models.Intelligence {
+	item, err := e.store.GetIntelligenceByID(id)
+	if err != nil {
+		e.logger.Error("Engine", fmt.Sprintf("Failed to get intelligence by ID: %v", err))
+		return nil
+	}
+	return item
+}
+
+// GetTotalCount gets the total count of intelligence items
 func (e *Engine) GetTotalCount() int {
-	return e.store.GetTotalCount()
+	count, err := e.store.GetTotalCount()
+	if err != nil {
+		e.logger.Error("Engine", fmt.Sprintf("Failed to get total count: %v", err))
+		return 0
+	}
+	return count
 }
