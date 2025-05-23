@@ -3,131 +3,137 @@ package logger
 
 import (
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
-
-	"github.com/NullMeDev/Infopulse-Node/internal/models"
 )
 
-// LogLevel represents severity level for logging
-type LogLevel int
-
+// Log levels
 const (
-	DEBUG LogLevel = iota
-	INFO
-	WARNING
-	ERROR
-	CRITICAL
+	LevelDebug    = 0
+	LevelInfo     = 1
+	LevelWarning  = 2
+	LevelError    = 3
+	LevelCritical = 4
 )
 
-// Logger handles logging to console and file
+// Logger provides logging functionality
 type Logger struct {
-	fileLogger  *log.Logger
-	consoleLogger *log.Logger
-	logFilePath string
-	logFile     *os.File
+	mu         sync.Mutex
+	file       *os.File
+	writers    []io.Writer
+	logLevel   int
+	timeFormat string
 }
 
-// NewLogger creates a new logger instance
-func NewLogger(logFilePath string) (*Logger, error) {
-	// Create log directory if it doesn't exist
-	logDir := filepath.Dir(logFilePath)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create log directory: %v", err)
+// NewLogger creates a new logger
+func NewLogger(filePath string) (*Logger, error) {
+	logger := &Logger{
+		logLevel:   LevelInfo,
+		timeFormat: "2006-01-02 15:04:05",
+		writers:    []io.Writer{os.Stdout}, // Default to stdout
 	}
 
-	// Open log file
-	logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open log file: %v", err)
+	// If a file path is provided, open the log file
+	if filePath != "" {
+		// Create directory if it doesn't exist
+		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+			return nil, fmt.Errorf("failed to create log directory: %v", err)
+		}
+
+		// Open log file
+		file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open log file: %v", err)
+		}
+
+		logger.file = file
+		logger.writers = append(logger.writers, file)
 	}
 
-	// Create loggers
-	fileLogger := log.New(logFile, "", log.Ldate|log.Ltime)
-	consoleLogger := log.New(os.Stdout, "", log.Ldate|log.Ltime)
-
-	return &Logger{
-		fileLogger:   fileLogger,
-		consoleLogger: consoleLogger,
-		logFilePath:  logFilePath,
-		logFile:      logFile,
-	}, nil
+	return logger, nil
 }
 
-// LogString logs a message with the specified level and source
-func (l *Logger) LogString(level LogLevel, source, message string) {
-	levelStr := getLevelString(level)
-	timestamp := time.Now()
-
-	// Format log message
-	logMessage := fmt.Sprintf("[%s] [%s] %s", levelStr, source, message)
-
-	// Log to console and file
-	l.consoleLogger.Println(logMessage)
-	l.fileLogger.Println(logMessage)
-}
-
-// LogIntel logs intelligence data
-func (l *Logger) LogIntel(level LogLevel, source string, intel *models.Intelligence) {
-	levelStr := getLevelString(level)
-	timestamp := time.Now()
-
-	// Format log message for intelligence data
-	logMessage := fmt.Sprintf("[%s] [%s] [Category: %s] %s - %s", 
-		levelStr, source, intel.Category, intel.Title, intel.URL)
-
-	// Log to console and file
-	l.consoleLogger.Println(logMessage)
-	l.fileLogger.Println(logMessage)
-
-	// TODO: Store intelligence in database for historical tracking
-}
-
-// Log different severity levels
-func (l *Logger) Debug(source, message string) {
-	l.LogString(DEBUG, source, message)
-}
-
-func (l *Logger) Info(source, message string) {
-	l.LogString(INFO, source, message)
-}
-
-func (l *Logger) Warning(source, message string) {
-	l.LogString(WARNING, source, message)
-}
-
-func (l *Logger) Error(source, message string) {
-	l.LogString(ERROR, source, message)
-}
-
-func (l *Logger) Critical(source, message string) {
-	l.LogString(CRITICAL, source, message)
-}
-
-// Helper function to convert log level to string
-func getLevelString(level LogLevel) string {
-	switch level {
-	case DEBUG:
-		return "DEBUG"
-	case INFO:
-		return "INFO"
-	case WARNING:
-		return "WARNING"
-	case ERROR:
-		return "ERROR"
-	case CRITICAL:
-		return "CRITICAL"
-	default:
-		return "UNKNOWN"
-	}
-}
-
-// Close closes the log file
+// Close closes the logger and any associated resources
 func (l *Logger) Close() error {
-	if l.logFile != nil {
-		return l.logFile.Close()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.file != nil {
+		return l.file.Close()
 	}
 	return nil
+}
+
+// SetLevel sets the logging level
+func (l *Logger) SetLevel(level int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logLevel = level
+}
+
+// log logs a message with the given level
+func (l *Logger) log(level int, component, message string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Check if we should log this level
+	if level < l.logLevel {
+		return
+	}
+
+	// Format timestamp
+	timestamp := time.Now().Format(l.timeFormat)
+
+	// Format level
+	var levelStr string
+	switch level {
+	case LevelDebug:
+		levelStr = "DEBUG"
+	case LevelInfo:
+		levelStr = "INFO"
+	case LevelWarning:
+		levelStr = "WARNING"
+	case LevelError:
+		levelStr = "ERROR"
+	case LevelCritical:
+		levelStr = "CRITICAL"
+	default:
+		levelStr = "UNKNOWN"
+	}
+
+	// Format message
+	msg := fmt.Sprintf("[%s] [%s] [%s] %s\n", timestamp, levelStr, component, message)
+
+	// Write to all writers
+	for _, writer := range l.writers {
+		writer.Write([]byte(msg))
+	}
+}
+
+// Debug logs a debug message
+func (l *Logger) Debug(component, message string) {
+	l.log(LevelDebug, component, message)
+}
+
+// Info logs an info message
+func (l *Logger) Info(component, message string) {
+	l.log(LevelInfo, component, message)
+}
+
+// Warning logs a warning message
+func (l *Logger) Warning(component, message string) {
+	l.log(LevelWarning, component, message)
+}
+
+// Error logs an error message
+func (l *Logger) Error(component, message string) {
+	l.log(LevelError, component, message)
+}
+
+// Critical logs a critical message
+func (l *Logger) Critical(component, message string) {
+	l.log(LevelCritical, component, message)
 }
