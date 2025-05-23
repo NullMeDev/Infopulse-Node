@@ -2,7 +2,6 @@
 package feeds
 
 import (
-	"context"
 	"crypto/md5"
 	"fmt"
 	"io"
@@ -15,183 +14,158 @@ import (
 	"github.com/mmcdole/gofeed"
 )
 
-// Parser handles fetching and parsing feeds
+// Parser handles parsing feed content
 type Parser struct {
-	client  *http.Client
-	logger  *logger.Logger
-	timeout time.Duration
+	feedParser *gofeed.Parser
+	client     *http.Client
+	logger     *logger.Logger
 }
 
 // NewParser creates a new feed parser
-func NewParser(timeout int, logger *logger.Logger) *Parser {
+func NewParser(timeoutSeconds int, logger *logger.Logger) *Parser {
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: time.Duration(timeoutSeconds) * time.Second,
+	}
+
 	return &Parser{
-		client: &http.Client{
-			Timeout: time.Duration(timeout) * time.Second,
-		},
-		logger:  logger,
-		timeout: time.Duration(timeout) * time.Second,
+		feedParser: gofeed.NewParser(),
+		client:     client,
+		logger:     logger,
 	}
 }
 
-// ParseFeed fetches and parses a feed from the given source
+// ParseFeed fetches and parses a feed source
 func (p *Parser) ParseFeed(source models.FeedSource) ([]*models.Intelligence, error) {
 	p.logger.Info("Parser", fmt.Sprintf("Fetching feed: %s (%s)", source.Name, source.URL))
 
-	switch source.FetchMethod {
+	var items []*models.Intelligence
+
+	// Handle different fetch methods
+	switch strings.ToLower(source.FetchMethod) {
 	case "rss":
-		return p.parseRSSFeed(source)
+		parsedItems, err := p.parseRSS(source)
+		if err != nil {
+			return nil, err
+		}
+		items = parsedItems
+	// Add other fetch methods here as needed
 	default:
-		return nil, fmt.Errorf("unsupported feed method: %s", source.FetchMethod)
+		return nil, fmt.Errorf("unsupported fetch method: %s", source.FetchMethod)
 	}
+
+	p.logger.Info("Parser", fmt.Sprintf("Parsed %d items from %s", len(items), source.Name))
+	return items, nil
 }
 
-// parseRSSFeed fetches and parses an RSS feed
-func (p *Parser) parseRSSFeed(source models.FeedSource) ([]*models.Intelligence, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", source.URL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
-	}
-	
-	req.Header.Set("User-Agent", "Infopulse-Node/1.0")
-
-	resp, err := p.client.Do(req)
+// parseRSS fetches and parses an RSS feed
+func (p *Parser) parseRSS(source models.FeedSource) ([]*models.Intelligence, error) {
+	// Fetch the feed content
+	resp, err := p.client.Get(source.URL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch feed: %v", err)
 	}
 	defer resp.Body.Close()
 
+	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch feed, status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("failed to fetch feed: HTTP %d", resp.StatusCode)
 	}
 
-	fp := gofeed.NewParser()
-	feed, err := fp.Parse(resp.Body)
+	// Parse the feed
+	feed, err := p.feedParser.Parse(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse feed: %v", err)
 	}
 
+	// Process items
 	var items []*models.Intelligence
-	for _, item := range feed.Items {
-		if item.Title == "" || item.Link == "" {
-			continue
-		}
+	now := time.Now().UTC()
 
-		intel := &models.Intelligence{
-			ID:        generateID(source.ID, item.GUID),
+	for _, feedItem := range feed.Items {
+		// Create intelligence item
+		item := &models.Intelligence{
 			SourceID:  source.ID,
-			Category:  getDefaultCategory(source.Categories),
-			Title:     item.Title,
-			URL:       item.Link,
-			Summary:   getSummary(item),
-			Hash:      generateHash(item.Title, item.Link, item.Description),
+			Title:     feedItem.Title,
+			URL:       feedItem.Link,
+			Retrieved: now,
+			Category:  source.Categories[0], // Default to first category
 		}
 
-		if item.PublishedParsed != nil {
-			intel.Published = *item.PublishedParsed
-		} else if item.UpdatedParsed != nil {
-			intel.Published = *item.UpdatedParsed
+		// Set summary
+		if feedItem.Description != "" {
+			item.Summary = cleanSummary(feedItem.Description)
+		} else if feedItem.Content != "" {
+			item.Summary = cleanSummary(feedItem.Content)
+		}
+
+		// Set published date
+		if feedItem.PublishedParsed != nil {
+			item.Published = *feedItem.PublishedParsed
+		} else if feedItem.UpdatedParsed != nil {
+			item.Published = *feedItem.UpdatedParsed
 		} else {
-			intel.Published = time.Now()
+			item.Published = now
 		}
 
-		intel.Retrieved = time.Now()
+		// Generate ID and hash
+		item.ID = generateID(item)
+		item.Hash = generateHash(item)
 
-		if containsCVE(item.Title) || containsCVE(item.Description) {
-			intel.Severity = estimateSeverity(item.Title, item.Description)
-		}
+		// Set severity if present
+		item.Severity = extractSeverity(feedItem)
 
-		items = append(items, intel)
+		items = append(items, item)
 	}
 
-	p.logger.Info("Parser", fmt.Sprintf("Fetched %d items from %s", len(items), source.Name))
 	return items, nil
 }
 
-// Helper to generate a unique ID for an intelligence item
-func generateID(sourceID, guid string) string {
-	if guid == "" {
-		return fmt.Sprintf("%s-%d", sourceID, time.Now().UnixNano())
+// cleanSummary cleans HTML and truncates the summary
+func cleanSummary(text string) string {
+	// TODO: Implement better HTML cleaning
+	// For now, do a simple truncation
+	if len(text) > 500 {
+		return text[:497] + "..."
 	}
-	return fmt.Sprintf("%s-%x", sourceID, md5.Sum([]byte(guid)))
-}
-
-// Helper to get default category for an intelligence item
-func getDefaultCategory(categories []models.Category) models.Category {
-	if len(categories) > 0 {
-		return categories[0]
-	}
-	return models.CategoryInfosecNews
-}
-
-// Helper to generate a hash for deduplication
-func generateHash(title, link, description string) string {
-	h := md5.New()
-	io.WriteString(h, title)
-	io.WriteString(h, link)
-	io.WriteString(h, description)
-	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-// Helper to extract summary from item
-func getSummary(item *gofeed.Item) string {
-	if item.Description != "" {
-		return stripHTMLAndTruncate(item.Description, 500)
-	}
-	
-	if item.Content != "" {
-		return stripHTMLAndTruncate(item.Content, 500)
-	}
-	
-	return item.Title
-}
-
-// Helper to strip HTML and truncate text
-func stripHTMLAndTruncate(input string, maxLength int) string {
-	text := strings.ReplaceAll(input, "<br>", "\n")
-	text = strings.ReplaceAll(text, "<br/>", "\n")
-	text = strings.ReplaceAll(text, "<br />", "\n")
-	
-	for strings.Contains(text, "<") && strings.Contains(text, ">") {
-		start := strings.Index(text, "<")
-		end := strings.Index(text[start:], ">") + start
-		if end > start {
-			text = text[:start] + text[end+1:]
-		} else {
-			break
-		}
-	}
-	
-	if len(text) > maxLength {
-		return text[:maxLength] + "..."
-	}
-	
 	return text
 }
 
-// Helper to check if text contains CVE references
-func containsCVE(text string) bool {
-	return strings.Contains(strings.ToUpper(text), "CVE-")
+// generateID creates a unique ID for an item
+func generateID(item *models.Intelligence) string {
+	// Use URL as basis for ID if available
+	if item.URL != "" {
+		hash := md5.Sum([]byte(item.URL))
+		return fmt.Sprintf("%x", hash)[:12]
+	}
+
+	// Fallback to title and timestamp
+	hash := md5.Sum([]byte(item.Title + item.Published.String()))
+	return fmt.Sprintf("%x", hash)[:12]
 }
 
-// Helper to estimate severity from CVE information
-func estimateSeverity(title, description string) string {
-	text := strings.ToLower(title + " " + description)
+// generateHash creates a hash for deduplication
+func generateHash(item *models.Intelligence) string {
+	hash := md5.Sum([]byte(item.Title + item.URL))
+	return fmt.Sprintf("%x", hash)
+}
+
+// extractSeverity extracts severity information from feed item
+func extractSeverity(feedItem *gofeed.Item) string {
+	// Check for CVE severity in title
+	title := strings.ToUpper(feedItem.Title)
 	
-	if strings.Contains(text, "critical") {
+	if strings.Contains(title, "CRITICAL") {
 		return "CRITICAL"
-	}
-	if strings.Contains(text, "high") {
+	} else if strings.Contains(title, "HIGH") {
 		return "HIGH"
-	}
-	if strings.Contains(text, "medium") {
+	} else if strings.Contains(title, "MEDIUM") {
 		return "MEDIUM"
-	}
-	if strings.Contains(text, "low") {
+	} else if strings.Contains(title, "LOW") {
 		return "LOW"
 	}
 	
-	return "MEDIUM"
+	// TODO: Implement better CVE severity extraction
+	
+	return ""
 }
